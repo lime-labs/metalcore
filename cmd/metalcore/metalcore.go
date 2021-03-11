@@ -33,7 +33,7 @@ func startSubprocess(pathToBinary string, socket string) bool {
 	return true
 }
 
-func handleRequest(socketConnection net.Conn, sessionID string, messageID string, task []byte, resultQueue string, resultChannel *amqp.Channel) bool {
+func handleRequest(socketConnection net.Conn, sessionID string, messageID string, task []byte, resultsBuffer chan<- queue.Result, resultQueue string, resultChannel *amqp.Channel) bool {
 	// buffer to hold incoming data.
 	buf := make([]byte, 1024)
 
@@ -43,25 +43,16 @@ func handleRequest(socketConnection net.Conn, sessionID string, messageID string
 	len, err := socketConnection.Read(buf)
 	common.FailOnError(err, "[IMP]      Error reading from socket")
 
-	result := buf[:len]
-	//log.Println("len", binary.Size(buf))
+	resultPayload := buf[:len]
 
-	if string(result) != "ERROR" {
-		//log.Println("[IMP]      "+string(task)+" done successfully! Result:", string(result))
+	if string(resultPayload) != "ERROR" {
+		// write result to result buffer go channel
+		result := queue.Result{MessageID: messageID, SessionID: sessionID, ResultQueue: resultQueue, Payload: resultPayload}
+		resultsBuffer <- result
 
-		// write task to result queue TODO: make this async (if not already) to return to task crunching within the same thread faster!
-		err = resultChannel.Publish(
-			"",          // exchange
-			resultQueue, // routing key
-			false,       // mandatory
-			false,       // immediate
-			amqp.Publishing{
-				ContentType:   "text/plain",
-				Body:          result,
-				CorrelationId: messageID,
-				AppId:         sessionID,
-			})
-
+		// signal successful handover to the result queue.
+		// WARNING!: at this stage it's handed over to the result BUFFER, not yet submitted to the actual queue
+		// on the broker side! might want to reconsider doing the confirm for the ACK more async as well.
 		return true
 	}
 
@@ -75,7 +66,7 @@ func getSocketPath(socketName string, number int) string {
 	return filepath.Join(osTempDir, name)
 }
 
-func createSocketListener(messages <-chan amqp.Delivery, socket string, resultChannel *amqp.Channel) {
+func createSocketListener(messages <-chan amqp.Delivery, resultsBuffer chan queue.Result, socket string, resultChannel *amqp.Channel) {
 	log.Printf("[IMP]      creating UNIX domain socket at %s", socket)
 
 	err := os.RemoveAll(socket)
@@ -96,7 +87,7 @@ func createSocketListener(messages <-chan amqp.Delivery, socket string, resultCh
 			for msg := range messages {
 				// if the handler returns true then ACK, else NACK
 				// to submit the message back into the rabbit queue for another round of processing
-				if handleRequest(conn, msg.AppId, msg.MessageId, msg.Body, msg.ReplyTo, resultChannel) {
+				if handleRequest(conn, msg.AppId, msg.MessageId, msg.Body, resultsBuffer, msg.ReplyTo, resultChannel) {
 					msg.Ack(false) // true = ack all previously unacknowledged messages (batching of acks, go routine / thread fuckups ahead!),
 				} else {
 					msg.Nack(false, true)
@@ -110,7 +101,7 @@ func createSocketListener(messages <-chan amqp.Delivery, socket string, resultCh
 
 func main() {
 	ncpu := runtime.NumCPU()
-	log.Printf("[IMP]      starting on a host with # of threads: %d", ncpu)
+	log.Printf("[IMP]      starting on a host / container with %d threads", ncpu)
 
 	amqpHost := os.Getenv("AMQPHOST")
 	amqpPort := os.Getenv("AMQPPORT")
@@ -132,12 +123,15 @@ func main() {
 	resultChannel := queue.CreateConnectionChannel(amqpConnectionString, 0)
 
 	msgs := queue.ConsumeOnChannel(taskChannel, taskQueue.Name)
+	// create a buffer queue / go channel to handle all result submissions in one thread / go routine
+	resultsBuffer := make(chan queue.Result, prefetchCount) // could also be unbuffered since publishings are async by default, but this decouples it even more
+	go queue.StartBackgroundResultsPublisher(resultsBuffer, resultChannel)
 
 	// create a goroutine for the number of concurrent threads requested
 	for i := 0; i < ncpu; i++ {
 		log.Printf("[IMP]      creating socket and starting worker for thread %v...\n", i)
 		socket := getSocketPath("metalcoreTaskSocket", i)
-		createSocketListener(msgs, socket, resultChannel)
+		createSocketListener(msgs, resultsBuffer, socket, resultChannel)
 		// start actual worker binary process here, pass and read parameters/result via socket created above
 		go startSubprocess(servicePath, socket)
 	}

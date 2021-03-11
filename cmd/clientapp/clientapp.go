@@ -20,6 +20,7 @@ func main() {
 	amqpPtr := flag.String("amqp", "amqp://guest:guest@localhost:5672", "AMQP connection string")
 	taskQueuePtr := flag.String("queue", "metalcore-tasks", "name of the task queue to use")
 	sessionPtr := flag.String("session", "metalcore-client-app/123456789", "name of the session identifier to use")
+	quietModePtr := flag.Bool("quiet", false, "set this flag to disable any printing of results and speed up result consumption")
 	flag.Parse()
 
 	hostname, err := os.Hostname()
@@ -45,7 +46,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-		log.Println("Starting publishing thread on client...")
+		log.Printf("Starting publishing thread on client, submitting %d tasks to task queue %s...", *taskNumPtr, taskQueueName)
 
 		for j := 0; j < *taskNumPtr; j++ {
 			err := taskChannel.Publish(
@@ -62,6 +63,7 @@ func main() {
 				})
 			common.FailOnError(err, "Failed to publish a message")
 		}
+		log.Println("DONE publishing tasks to task queue!")
 	}()
 
 	wg.Add(1)
@@ -69,13 +71,22 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-		log.Println("Starting result consuming thread on client...")
+		log.Printf("Starting result consuming thread on client, receiving results from queue %s...", resultQueueName)
 
 		msgs := queue.ConsumeOnChannel(resultChannel, resultQueueName)
 
+		i := 0
 		for msg := range msgs {
-			log.Println("[client] Session #: " + msg.AppId + " received result. Task #: " + msg.CorrelationId + ", result: " + string(msg.Body))
-			msg.Ack(false)
+
+			if !*quietModePtr {
+				log.Println("Session #: " + msg.AppId + " received result. Task #: " + msg.CorrelationId + ", result: " + string(msg.Body))
+			}
+			msg.Ack(false) // despite the looks of this format, this actually ACKs the message
+
+			i++
+			if i == *taskNumPtr {
+				log.Printf("DONE receiving results from result queue, received %d results.", *taskNumPtr)
+			}
 		}
 
 	}()
