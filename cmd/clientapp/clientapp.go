@@ -9,7 +9,6 @@ import (
 
 	"github.com/lime-labs/metalcore/internal/pkg/common"
 	"github.com/lime-labs/metalcore/pkg/queue"
-	"github.com/streadway/amqp"
 )
 
 func main() {
@@ -20,7 +19,7 @@ func main() {
 	amqpPtr := flag.String("amqp", "amqp://guest:guest@localhost:5672", "AMQP connection string")
 	taskQueuePtr := flag.String("queue", "metalcore-tasks", "name of the task queue to use")
 	sessionPtr := flag.String("session", "metalcore-client-app/123456789", "name of the session identifier to use")
-	quietModePtr := flag.Bool("quiet", false, "set this flag to disable any printing of results and speed up result consumption")
+	debugFlagPtr := flag.Bool("debug", false, "set this flag to enable printing of received results [slows down performance!]")
 	flag.Parse()
 
 	hostname, err := os.Hostname()
@@ -49,19 +48,11 @@ func main() {
 		log.Printf("Starting publishing thread on client, submitting %d tasks to task queue %s...", *taskNumPtr, taskQueueName)
 
 		for j := 0; j < *taskNumPtr; j++ {
-			err := taskChannel.Publish(
-				"",             // exchange
-				taskQueue.Name, // routing key
-				false,          // mandatory
-				false,          // immediate
-				amqp.Publishing{
-					ContentType: "text/plain",
-					Body:        []byte(body),
-					ReplyTo:     resultQueue.Name,
-					AppId:       sessionID,
-					MessageId:   strconv.Itoa(j),
-				})
-			common.FailOnError(err, "Failed to publish a message")
+			task := queue.Message{MessageID: strconv.Itoa(j), SessionID: sessionID, Queue: taskQueue.Name, ReplyTo: resultQueue.Name, Payload: []byte(body)}
+			queue.SendMessageToQueueChannel(taskChannel, task)
+			if *debugFlagPtr {
+				log.Println("Session #: " + task.SessionID + " sent task. Task #: " + task.MessageID + ", task payload: " + string(task.Payload))
+			}
 		}
 		log.Println("DONE publishing tasks to task queue!")
 	}()
@@ -78,8 +69,8 @@ func main() {
 		i := 0
 		for msg := range msgs {
 
-			if !*quietModePtr {
-				log.Println("Session #: " + msg.AppId + " received result. Task #: " + msg.CorrelationId + ", result: " + string(msg.Body))
+			if *debugFlagPtr {
+				log.Println("Session #: " + msg.AppId + " received result. Task #: " + msg.CorrelationId + ", result payload: " + string(msg.Body))
 			}
 			msg.Ack(false) // despite the looks of this format, this actually ACKs the message
 

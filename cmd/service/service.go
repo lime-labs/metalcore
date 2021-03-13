@@ -21,18 +21,18 @@ func reader(r io.Reader) []byte {
 }
 
 func writer(w io.Writer, data []byte) {
-	_, err := w.Write([]byte(data))
+	_, err := w.Write(data)
 	common.FailOnError(err, "[instance] socket write error")
 }
 
-func sleepms(data []byte) string {
+func sleepms(data []byte) []byte {
 	// need to convert to string first, currently raw serialization from/to strings
 	durationInt, _ := strconv.Atoi(string(data))
 	duration := time.Millisecond * time.Duration(durationInt)
 
 	time.Sleep(duration)
 
-	return "worker process slept for " + duration.String()
+	return []byte("worker process slept for " + duration.String())
 }
 
 func main() {
@@ -57,6 +57,6 @@ func main() {
 		result := sleepms(data)
 
 		// DONE
-		writer(c, []byte(result))
+		writer(c, result)
 	}
 }

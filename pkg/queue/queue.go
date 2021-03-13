@@ -7,34 +7,41 @@ import (
 	"github.com/streadway/amqp"
 )
 
-// Result creates...
-type Result struct {
-	MessageID   string
-	SessionID   string
-	ResultQueue string
-	Payload     []byte
+// Message struct creates...
+type Message struct {
+	MessageID     string
+	SessionID     string
+	CorrelationID string
+	Queue         string
+	ReplyTo       string
+	Payload       []byte
 }
 
-// StartBackgroundResultsPublisher provides...
-func StartBackgroundResultsPublisher(resultsBuffer <-chan Result, resultChannel *amqp.Channel) {
-	// endlessly listen for results that need to be published
-	for result := range resultsBuffer {
-		//result := <-resultsBuffer // synchronization
+// SendMessageToQueueChannel ...
+func SendMessageToQueueChannel(channel *amqp.Channel, message Message) {
+	err := channel.Publish(
+		"",            // exchange
+		message.Queue, // routing key
+		false,         // mandatory
+		false,         // immediate
+		amqp.Publishing{
+			ContentType:   "text/plain",
+			MessageId:     message.MessageID,
+			Body:          message.Payload,
+			ReplyTo:       message.ReplyTo,
+			CorrelationId: message.CorrelationID,
+			AppId:         message.SessionID,
+		})
+	if err != nil {
+		log.Println("[AMQP]     error during publishiung of message", err) // don't fataly fail, print error and continue
+	}
+}
 
-		err := resultChannel.Publish(
-			"",                 // exchange
-			result.ResultQueue, // routing key
-			false,              // mandatory
-			false,              // immediate
-			amqp.Publishing{
-				ContentType:   "text/plain",
-				Body:          result.Payload,
-				CorrelationId: result.MessageID,
-				AppId:         result.SessionID,
-			})
-		if err != nil {
-			log.Println("[AMQP]     error during publishiung of result", err)
-		}
+// StartBackgroundPublisher ...
+func StartBackgroundPublisher(messageBuffer <-chan Message, channel *amqp.Channel) {
+	// endlessly listen for messages that need to be published
+	for message := range messageBuffer {
+		SendMessageToQueueChannel(channel, message)
 	}
 }
 

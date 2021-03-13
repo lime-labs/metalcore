@@ -12,7 +12,18 @@ import (
 	"github.com/lime-labs/metalcore/internal/pkg/common"
 	"github.com/lime-labs/metalcore/pkg/queue"
 	"github.com/streadway/amqp"
+	_ "go.uber.org/automaxprocs" // currently needed since cgroup CPU limits are not mapped to GOMAXPROCS automatically without it
 )
+
+var config struct {
+	debug                bool
+	ncpulimit            int
+	amqpConnectionString string
+	taskQueueName        string
+	prefetchCount        int
+	resultBufferSize     int
+	servicePath          string
+}
 
 func startSubprocess(pathToBinary string, socket string) bool {
 	log.Println("[IMP]      starting process " + pathToBinary + " with socket " + socket)
@@ -33,7 +44,10 @@ func startSubprocess(pathToBinary string, socket string) bool {
 	return true
 }
 
-func handleRequest(socketConnection net.Conn, sessionID string, messageID string, task []byte, resultsBuffer chan<- queue.Result, resultQueue string, resultChannel *amqp.Channel) bool {
+func handleRequest(socketConnection net.Conn, sessionID string, messageID string, task []byte, resultsBuffer chan<- queue.Message, resultQueue string, resultChannel *amqp.Channel) bool {
+	if config.debug {
+		log.Printf("[IMP]      [DEBUG] task messageID: %v | payload: %v", messageID, string(task))
+	}
 	// buffer to hold incoming data.
 	buf := make([]byte, 1024)
 
@@ -45,9 +59,13 @@ func handleRequest(socketConnection net.Conn, sessionID string, messageID string
 
 	resultPayload := buf[:len]
 
+	if config.debug {
+		log.Printf("[IMP]      [DEBUG] result correlationID: %v | payload: %v", messageID, string(resultPayload))
+	}
+
 	if string(resultPayload) != "ERROR" {
 		// write result to result buffer go channel
-		result := queue.Result{MessageID: messageID, SessionID: sessionID, ResultQueue: resultQueue, Payload: resultPayload}
+		result := queue.Message{CorrelationID: messageID, SessionID: sessionID, Queue: resultQueue, Payload: resultPayload}
 		resultsBuffer <- result
 
 		// signal successful handover to the result queue.
@@ -66,7 +84,7 @@ func getSocketPath(socketName string, number int) string {
 	return filepath.Join(osTempDir, name)
 }
 
-func createSocketListener(messages <-chan amqp.Delivery, resultsBuffer chan queue.Result, socket string, resultChannel *amqp.Channel) {
+func createSocketListener(messages <-chan amqp.Delivery, resultsBuffer chan<- queue.Message, socket string, resultChannel *amqp.Channel) {
 	log.Printf("[IMP]      creating UNIX domain socket at %s", socket)
 
 	err := os.RemoveAll(socket)
@@ -99,44 +117,69 @@ func createSocketListener(messages <-chan amqp.Delivery, resultsBuffer chan queu
 	}()
 }
 
-func main() {
+func init() {
+	if os.Getenv("DEBUG") == "on" {
+		config.debug = true
+		log.Println("[IMP]      [DEBUG] mode enabled!")
+	}
+
 	ncpu := runtime.NumCPU()
-	log.Printf("[IMP]      starting on a host / container with %d threads", ncpu)
+	log.Printf("[IMP]      starting on a host with %d logical CPUs", ncpu)
+
+	manualMaxCPULimit := os.Getenv("CPULIMIT")
+	if manualMaxCPULimit != "" {
+		var err error
+		config.ncpulimit, err = strconv.Atoi(manualMaxCPULimit)
+		common.FailOnError(err, "error parsing CPULIMIT into an int")
+		runtime.GOMAXPROCS(config.ncpulimit)
+		log.Printf("[IMP]      GOMAXPROCS has been manually set to %d via env variable CPULIMIT", config.ncpulimit)
+	} else {
+		config.ncpulimit = runtime.GOMAXPROCS(0) // leave limit untouched, return current setting of GOMAXPROCS
+	}
+
+	log.Printf("[IMP]      number of usable logical CPUs for this IMP is set to %d", config.ncpulimit)
+
+	config.prefetchCount = config.ncpulimit * 100
+	config.resultBufferSize = config.prefetchCount
+
+	log.Printf("[IMP]      prefetch count for task queue set to %d messages", config.prefetchCount)
+	log.Printf("[IMP]      buffer size for results in internal memory set to %d items", config.resultBufferSize)
 
 	amqpHost := os.Getenv("AMQPHOST")
 	amqpPort := os.Getenv("AMQPPORT")
 	amqpUser := os.Getenv("AMQPUSER")
 	amqpPassword := os.Getenv("AMQPPASSWORD")
-	taskQueueName := os.Getenv("TASKQUEUENAME")
-	servicePath := os.Getenv("SERVICEPATH")
+	config.taskQueueName = os.Getenv("TASKQUEUENAME")
+	config.servicePath = os.Getenv("SERVICEPATH")
 
-	if amqpHost == "" || amqpUser == "" || amqpPassword == "" || taskQueueName == "" || servicePath == "" {
-		log.Fatalln("[IMP]      not all required env variables set, exiting now...")
+	if amqpHost == "" || amqpUser == "" || amqpPassword == "" || config.taskQueueName == "" || config.servicePath == "" {
+		log.Fatalln("[IMP]      not all required env variables for an AMQP connection set, exiting now...")
 	}
 
-	amqpConnectionString := "amqp://" + amqpUser + ":" + amqpPassword + "@" + amqpHost + ":" + amqpPort
+	config.amqpConnectionString = "amqp://" + amqpUser + ":" + amqpPassword + "@" + amqpHost + ":" + amqpPort
+}
 
-	prefetchCount := ncpu * 100
-	taskChannel := queue.CreateConnectionChannel(amqpConnectionString, prefetchCount)
-	taskQueue := queue.DeclareQueue(taskChannel, taskQueueName)
+func main() {
+	taskChannel := queue.CreateConnectionChannel(config.amqpConnectionString, config.prefetchCount)
+	taskQueue := queue.DeclareQueue(taskChannel, config.taskQueueName)
 
-	resultChannel := queue.CreateConnectionChannel(amqpConnectionString, 0)
+	resultChannel := queue.CreateConnectionChannel(config.amqpConnectionString, 0)
 
 	msgs := queue.ConsumeOnChannel(taskChannel, taskQueue.Name)
-	// create a buffer queue / go channel to handle all result submissions in one thread / go routine
-	resultsBuffer := make(chan queue.Result, prefetchCount) // could also be unbuffered since publishings are async by default, but this decouples it even more
-	go queue.StartBackgroundResultsPublisher(resultsBuffer, resultChannel)
+	// create a buffer queue / go channel to handle all result submissions in a dedicated, central go routine
+	resultsBuffer := make(chan queue.Message, config.prefetchCount) // could also be unbuffered since publishings are async by default, but this decouples it even more
+	go queue.StartBackgroundPublisher(resultsBuffer, resultChannel)
 
-	// create a goroutine for the number of concurrent threads requested
-	for i := 0; i < ncpu; i++ {
-		log.Printf("[IMP]      creating socket and starting worker for thread %v...\n", i)
+	// create a go routine for each concurrent thread requested
+	log.Printf("[IMP]      starting %d worker instances of service %v...", config.ncpulimit, config.servicePath)
+	for i := 0; i < config.ncpulimit; i++ {
+		log.Printf("[IMP]      creating local socket and starting worker for thread %d...", i)
 		socket := getSocketPath("metalcoreTaskSocket", i)
 		createSocketListener(msgs, resultsBuffer, socket, resultChannel)
 		// start actual worker binary process here, pass and read parameters/result via socket created above
-		go startSubprocess(servicePath, socket)
+		go startSubprocess(config.servicePath, socket)
 	}
 
-	// never end, inifitenly wait for all subprocesses
 	forever := make(chan bool)
-	<-forever
+	<-forever // never end, inifitenly wait for all subprocesses
 }
