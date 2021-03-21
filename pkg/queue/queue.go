@@ -1,9 +1,8 @@
 package queue
 
 import (
-	"log"
-
 	"github.com/lime-labs/metalcore/internal/pkg/common"
+	"github.com/rs/zerolog/log"
 	"github.com/streadway/amqp"
 )
 
@@ -33,14 +32,13 @@ func SendMessageToQueueChannel(channel *amqp.Channel, message Message) {
 			AppId:         message.SessionID,
 		})
 	if err != nil {
-		log.Println("[AMQP]     error during publishiung of message", err) // don't fataly fail, print error and continue
+		log.Error().Err(err).Str("component", "AMQP").Msg("error during publishing of message") // don't fataly fail, just log the error and continue
 	}
 }
 
 // StartBackgroundPublisher ...
 func StartBackgroundPublisher(messageBuffer <-chan Message, channel *amqp.Channel) {
-	// endlessly listen for messages that need to be published
-	for message := range messageBuffer {
+	for message := range messageBuffer { // endlessly listen for messages that need to be published
 		SendMessageToQueueChannel(channel, message)
 	}
 }
@@ -48,18 +46,18 @@ func StartBackgroundPublisher(messageBuffer <-chan Message, channel *amqp.Channe
 // CreateConnectionChannel returns an AMQP channel
 func CreateConnectionChannel(AMQPconnectionString string, prefetch int) *amqp.Channel {
 	conn, err := amqp.Dial(AMQPconnectionString)
-	common.FailOnError(err, "[AMQP]     failed to connect to RabbitMQ")
+	common.FailOnError(err, "failed to connect to RabbitMQ", "AMQP")
 	//defer conn.Close()
 
 	ch, err := conn.Channel()
-	common.FailOnError(err, "[AMQP]     failed to open a channel")
+	common.FailOnError(err, "failed to open a channel", "AMQP")
 	//defer ch.Close()
 
-	log.Printf("[AMQP]     successfully connected to AMQP broker: " + AMQPconnectionString)
+	log.Info().Str("component", "AMQP").Msgf("successfully connected to AMQP broker at %v", AMQPconnectionString)
 
 	if prefetch != 0 {
 		err = ch.Qos(prefetch, 0, false)
-		common.FailOnError(err, "[AMQP]     failed to set QoS prefetch level on queue")
+		common.FailOnError(err, "failed to set QoS prefetch level on queue", "AMQP")
 	}
 
 	return ch
@@ -75,7 +73,7 @@ func DeclareQueue(channel *amqp.Channel, queueName string) amqp.Queue {
 		false,     // no-wait
 		nil,       // arguments
 	)
-	common.FailOnError(err, "[AMQP]     failed to declare a queue")
+	common.FailOnError(err, "failed to declare a queue", "AMQP")
 
 	return q
 }
@@ -91,7 +89,7 @@ func ConsumeOnChannel(channel *amqp.Channel, queueName string) <-chan amqp.Deliv
 		false,     // no-wait
 		nil,       // args
 	)
-	common.FailOnError(err, "[AMQP]     failed to consume messages from queue "+queueName)
+	common.FailOnError(err, "failed to consume messages from queue "+queueName, "AMQP")
 
 	return msgs
 }

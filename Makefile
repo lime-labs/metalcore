@@ -19,7 +19,10 @@ image:
 	docker build -t metalcore-test -f build/docker/Dockerfile .
 
 container:
-	echo "starting a new imp container with a random name..."
+	docker run --rm --network=host --cpus=2 --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-test
+
+containerdaemon:
+	echo "starting a new container with a random name..."
 	docker run -d --rm --network="host" metalcore-test
 	docker ps -l
 

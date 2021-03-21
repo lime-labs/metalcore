@@ -1,12 +1,12 @@
 package common
 
 import (
-	"log"
+	"github.com/rs/zerolog/log"
 )
 
 // FailOnError provides a shortcut for checking for errors and failing fataly in one clean line
-func FailOnError(err error, msg string) {
+func FailOnError(err error, msg string, comp string) {
 	if err != nil {
-		log.Fatalf("%s: %s", msg, err)
+		log.Fatal().Err(err).Str("component", comp).Msg(msg)
 	}
 }

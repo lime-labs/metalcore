@@ -2,13 +2,14 @@ package main
 
 import (
 	"flag"
-	"log"
 	"os"
 	"strconv"
 	"sync"
 
 	"github.com/lime-labs/metalcore/internal/pkg/common"
 	"github.com/lime-labs/metalcore/pkg/queue"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
@@ -19,11 +20,25 @@ func main() {
 	amqpPtr := flag.String("amqp", "amqp://guest:guest@localhost:5672", "AMQP connection string")
 	taskQueuePtr := flag.String("queue", "metalcore-tasks", "name of the task queue to use")
 	sessionPtr := flag.String("session", "metalcore-client-app/123456789", "name of the session identifier to use")
-	debugFlagPtr := flag.Bool("debug", false, "set this flag to enable printing of received results [slows down performance!]")
+	logLevelPtr := flag.String("loglevel", "info", "set this to debug or trace to enable more verbose log outputs [slows down performance!]")
+	prettyLogPtr := flag.Bool("pretty", false, "set this flag to enable human readable output of the log [otherwise JSON format will be used]")
 	flag.Parse()
 
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	switch *logLevelPtr {
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "trace":
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	default:
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+	if *prettyLogPtr {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	}
+
 	hostname, err := os.Hostname()
-	common.FailOnError(err, "failed to get hostname")
+	common.FailOnError(err, "failed to get hostname", "client")
 
 	sessionID := *sessionPtr
 
@@ -41,47 +56,37 @@ func main() {
 	var wg sync.WaitGroup
 
 	wg.Add(1)
-	// publish in one thread
-	go func() {
+	go func() { // publish in one thread
 		defer wg.Done()
 
-		log.Printf("Starting publishing thread on client, submitting %d tasks to task queue %s...", *taskNumPtr, taskQueueName)
+		log.Info().Str("component", "client").Msgf("Starting publishing thread on client, submitting %d tasks to task queue %s...", *taskNumPtr, taskQueueName)
 
 		for j := 0; j < *taskNumPtr; j++ {
 			task := queue.Message{MessageID: strconv.Itoa(j), SessionID: sessionID, Queue: taskQueue.Name, ReplyTo: resultQueue.Name, Payload: []byte(body)}
 			queue.SendMessageToQueueChannel(taskChannel, task)
-			if *debugFlagPtr {
-				log.Println("Session #: " + task.SessionID + " sent task. Task #: " + task.MessageID + ", task payload: " + string(task.Payload))
-			}
+			log.Trace().Str("component", "client").Msgf("Session #: %v sent task. Task #: %v, task payload: %v", task.SessionID, task.MessageID, string(task.Payload))
 		}
-		log.Println("DONE publishing tasks to task queue!")
+		log.Info().Str("component", "client").Msg("DONE publishing tasks to task queue!")
 	}()
 
 	wg.Add(1)
-	// consume results in another thread
-	go func() {
+	go func() { // consume results in another thread
 		defer wg.Done()
 
-		log.Printf("Starting result consuming thread on client, receiving results from queue %s...", resultQueueName)
+		log.Info().Str("component", "client").Msgf("Starting result consuming thread on client, receiving results from queue %s...", resultQueueName)
 
 		msgs := queue.ConsumeOnChannel(resultChannel, resultQueueName)
 
 		i := 0
 		for msg := range msgs {
-
-			if *debugFlagPtr {
-				log.Println("Session #: " + msg.AppId + " received result. Task #: " + msg.CorrelationId + ", result payload: " + string(msg.Body))
-			}
+			log.Trace().Str("component", "client").Msgf("Session #: %v received result. Task #: %v, result payload: %v", msg.AppId, msg.CorrelationId, string(msg.Body))
 			msg.Ack(false) // despite the looks of this format, this actually ACKs the message
 
-			i++
-			if i == *taskNumPtr {
-				log.Printf("DONE receiving results from result queue, received %d results.", *taskNumPtr)
+			if i++; i == *taskNumPtr {
+				log.Info().Str("component", "client").Msgf("DONE receiving results from result queue, received %d results.", *taskNumPtr)
 			}
 		}
-
 	}()
 
 	wg.Wait() // wait / sync for threads / goroutines
-
 }
