@@ -22,6 +22,7 @@ var config struct {
 	queueConnectionString string
 	taskQueueName         string
 	resultQueueName       string
+	connShareFactor       int
 	servicePath           string
 }
 
@@ -33,6 +34,12 @@ type message struct {
 	Queue         string
 	ReplyTo       string
 	Payload       []byte
+}
+
+type queueConn struct {
+	taskConn *beanstalk.Conn
+	tasks    *beanstalk.TubeSet
+	results  *beanstalk.Tube
 }
 
 func startSubprocess(pathToBinary string, socket string, subprocessCounter chan<- int, errorCounter chan<- int) {
@@ -148,6 +155,20 @@ func errorCount(channel <-chan int) {
 	}
 }
 
+func createQueueConnectionsAndTubes(connString string, taskQueueName string, resultQueueName string) (queueConnInstance queueConn) {
+	var err error
+	queueConnInstance.taskConn, err = beanstalk.Dial("tcp", connString)
+	common.FailOnError(err, "failed to connect to work queue server", "IMP")
+
+	resultConn, err := beanstalk.Dial("tcp", connString)
+	common.FailOnError(err, "failed to connect to work queue server", "IMP")
+
+	queueConnInstance.tasks = beanstalk.NewTubeSet(queueConnInstance.taskConn, taskQueueName)
+	queueConnInstance.results = beanstalk.NewTube(resultConn, resultQueueName)
+
+	return
+}
+
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	switch loglevel := os.Getenv("LOGLEVEL"); loglevel {
@@ -187,6 +208,15 @@ func init() {
 	}
 	log.Debug().Str("component", "IMP").Msgf("error limit is set to %d", config.errorLimit)
 
+	config.connShareFactor = 1 // default value that can be overwritten with the env variable below
+	if connShareFactorString := os.Getenv("CONNSHAREFACTOR"); connShareFactorString != "" {
+		var err error
+		config.connShareFactor, err = strconv.Atoi(connShareFactorString)
+		common.FailOnError(err, "error parsing CONNSHAREFACTOR into an int", "IMP")
+		log.Info().Str("component", "IMP").Msgf("connection sharing factor has been manually set to %d via env variable CONNSHAREFACTOR", config.connShareFactor)
+	}
+	log.Debug().Str("component", "IMP").Msgf("connection sharing factor is set to %d", config.connShareFactor)
+
 	queueHost := os.Getenv("QUEUEHOST")
 	queuePort := os.Getenv("QUEUEPORT")
 
@@ -202,27 +232,25 @@ func init() {
 }
 
 func main() {
-	taskConnection, err := beanstalk.Dial("tcp", config.queueConnectionString)
-	common.FailOnError(err, "failed to connect to work queue server", "IMP")
-
-	resultConnection, err := beanstalk.Dial("tcp", config.queueConnectionString)
-	common.FailOnError(err, "failed to connect to work queue server", "IMP")
-
-	taskTubeSet := beanstalk.NewTubeSet(taskConnection, config.taskQueueName)
-	resultTube := beanstalk.NewTube(resultConnection, config.resultQueueName)
-
 	subprocessCounter := make(chan int)   // go channel to count started subprocesses
 	go subprocessCount(subprocessCounter) // start the goroutine that syncs the count
 	errorCounter := make(chan int)        // go channel to count errors happening during sub-process execution
 	go errorCount(errorCounter)           // start the goroutine that syncs the error count
+
+	connMap := make(map[int]queueConn)
+	var connIndex int
 
 	// create a go routine for each concurrent thread requested
 	log.Info().Str("component", "IMP").Msgf("starting %d worker instances of service %v...", config.ncpuLimit, config.servicePath)
 	for i := 0; i < config.ncpuLimit; i++ {
 		log.Debug().Str("component", "IMP").Msgf("creating local socket and starting worker for thread %d...", i)
 		socket := getSocketPath("metalcoreTaskSocket", i)
-		createSocketListener(*taskConnection, *taskTubeSet, *resultTube, socket, errorCounter)
-		// start actual worker binary process here, pass and read parameters/result via socket created above
+		connIndex = i / config.connShareFactor // 1 connection will be shared by connShareFactor threads
+		if i%config.connShareFactor == 0 {
+			log.Debug().Str("component", "IMP").Msgf("creating task and result queue connection instance #%d...", connIndex)
+			connMap[connIndex] = createQueueConnectionsAndTubes(config.queueConnectionString, config.taskQueueName, config.resultQueueName)
+		}
+		createSocketListener(*connMap[connIndex].taskConn, *connMap[connIndex].tasks, *connMap[connIndex].results, socket, errorCounter)
 		go startSubprocess(config.servicePath, socket, subprocessCounter, errorCounter) // TODO: handle sub-process restarts on errors (use the go channel!)
 	}
 

@@ -13,6 +13,7 @@ ENV QUEUEHOST=localhost \
     QUEUEPORT=11300 \
     TASKQUEUENAME=tasks \
     RESULTQUEUENAME=results \
+    CONNSHAREFACTOR=1 \
     SERVICEPATH=./service
 
 ENTRYPOINT ["/app/metalcore"]
