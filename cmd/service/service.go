@@ -1,10 +1,8 @@
 package main
 
 import (
-	"io"
 	"net"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/lime-labs/metalcore/internal/pkg/common"
@@ -12,23 +10,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func reader(r io.Reader) []byte {
-	buf := make([]byte, 1024)
-	n, err := r.Read(buf[:])
-	common.FailOnError(err, "socket read error", "service")
-	data := buf[0:n]
-	log.Trace().Str("component", "service").Msgf("sub-process instance received data from socket: %v", string(data))
-	return data
-}
-
-func writer(w io.Writer, data []byte) {
-	_, err := w.Write(data)
-	common.FailOnError(err, "socket write error", "service")
-	log.Trace().Str("component", "service").Msgf("sub-process instance sent result data to socket: %v", string(data))
-}
-
 func sleepms(data []byte) []byte {
-	durationInt, _ := strconv.Atoi(string(data)) // need to convert to string first, currently raw serialization from/to strings
+	// durationInt, err := strconv.Atoi(string(data)) // need to convert to string first, currently raw serialization from/to strings
+	// common.LogOnErrorShort(err, "error converting task payload to int, will be sleeping for 0s as a result...", "service")
+	durationInt := 0 // TODO: remove the hardcoded value once protobuf is in place to read the proper value from the payload!
 	duration := time.Millisecond * time.Duration(durationInt)
 
 	time.Sleep(duration) // the actual task at hand
@@ -59,13 +44,13 @@ func main() {
 
 	log.Debug().Str("component", "service").Msgf("connecting sub-process instance on METALCORESOCKET %v to parent IMP", socket)
 
-	c, err := net.Dial("unix", socket)
+	socketConnection, err := net.Dial("unix", socket)
 	common.FailOnError(err, "error connecting to socket", "service")
-	defer c.Close()
+	defer socketConnection.Close()
 
 	for {
-		data := reader(c)       // GET TASK
-		result := sleepms(data) // DO STUFF
-		writer(c, result)       // DONE
+		data := common.Reader(socketConnection, "service") // reader(c)       // GET TASK
+		result := sleepms(data)                            // DO STUFF
+		common.Writer(socketConnection, result, "service") // writer(c, result)                   // DONE
 	}
 }

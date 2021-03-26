@@ -7,23 +7,32 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"time"
 
+	"github.com/beanstalkd/go-beanstalk"
 	"github.com/lime-labs/metalcore/internal/pkg/common"
-	"github.com/lime-labs/metalcore/pkg/queue"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/streadway/amqp"
 	"go.uber.org/automaxprocs/maxprocs" // currently needed since cgroup CPU limits are not mapped to GOMAXPROCS automatically without it
 )
 
 var config struct {
-	ncpuLimit            int
-	errorLimit           int
-	amqpConnectionString string
-	taskQueueName        string
-	prefetchCount        int
-	resultBufferSize     int
-	servicePath          string
+	ncpuLimit             int
+	errorLimit            int
+	queueConnectionString string
+	taskQueueName         string
+	resultQueueName       string
+	servicePath           string
+}
+
+// remove once protobuf is in place
+type message struct {
+	MessageID     string
+	SessionID     string
+	CorrelationID string
+	Queue         string
+	ReplyTo       string
+	Payload       []byte
 }
 
 func startSubprocess(pathToBinary string, socket string, subprocessCounter chan<- int, errorCounter chan<- int) {
@@ -54,29 +63,16 @@ func startSubprocess(pathToBinary string, socket string, subprocessCounter chan<
 	}
 }
 
-func handleRequest(socketConnection net.Conn, sessionID string, messageID string, task []byte, resultsBuffer chan<- queue.Message, resultQueue string, resultChannel *amqp.Channel) bool {
-	log.Trace().Str("component", "IMP").Msgf("task messageID: %v | payload: %v", messageID, string(task))
-	buf := make([]byte, 1024) // buffer to hold incoming data
+func handleRequest(socketConnection net.Conn, task []byte, results beanstalk.Tube) bool {
+	common.Writer(socketConnection, task, "IMP")            // send task to sub-process
+	resultPayload := common.Reader(socketConnection, "IMP") // receive result from sub-process
 
-	socketConnection.Write(task) // Send a task back to the process that established the connection
-
-	len, err := socketConnection.Read(buf)
+	id, err := results.Put(resultPayload, 1, 0, 120*time.Second) // send result to result queue
 	if err != nil {
-		log.Error().Err(err).Str("component", "IMP").Msg("received an error during sub-process task execution while reading task result from socket")
+		common.LogOnError(err, "error putting result on result queue: "+results.Name, "IMP")
 		return false
 	}
-
-	resultPayload := buf[:len]
-
-	log.Trace().Str("component", "IMP").Msgf("result correlationID: %v | payload: %v", messageID, string(resultPayload))
-
-	// write result to result buffer go channel
-	result := queue.Message{CorrelationID: messageID, SessionID: sessionID, Queue: resultQueue, Payload: resultPayload}
-	resultsBuffer <- result
-
-	// signal successful handover to the result queue.
-	// WARNING!: at this stage it's handed over to the result BUFFER, not yet submitted to the actual queue
-	// on the broker side! might want to reconsider doing the confirm for the ACK more async as well.
+	log.Trace().Str("component", "IMP").Msgf("sent result #: %d, result payload: %d bytes, result queue: %v ", id, len(resultPayload), results.Name)
 	return true
 }
 
@@ -86,7 +82,7 @@ func getSocketPath(socketName string, number int) string {
 	return filepath.Join(osTempDir, name)
 }
 
-func createSocketListener(messages <-chan amqp.Delivery, resultsBuffer chan<- queue.Message, socket string, resultChannel *amqp.Channel) {
+func createSocketListener(queueConnection beanstalk.Conn, tasks beanstalk.TubeSet, results beanstalk.Tube, socket string, errorCounter chan<- int) {
 	log.Debug().Str("component", "IMP").Msgf("creating UNIX domain socket at %s", socket)
 
 	err := os.RemoveAll(socket)
@@ -104,16 +100,28 @@ func createSocketListener(messages <-chan amqp.Delivery, resultsBuffer chan<- qu
 
 			log.Debug().Str("component", "IMP").Msgf("client sub-process connected via [%s] on socket %s", conn.RemoteAddr().Network(), socket)
 
-			for msg := range messages {
-				// if the handler returns true then ACK, else NACK
-				// to submit the message back into the rabbit queue for another round of processing
-				if handleRequest(conn, msg.AppId, msg.MessageId, msg.Body, resultsBuffer, msg.ReplyTo, resultChannel) {
-					msg.Ack(false) // true = ack all previously unacknowledged messages (batching of acks, go routine / thread fuckups ahead!),
-				} else {
-					msg.Nack(false, true)
+			for {
+				id, task, err := tasks.Reserve(1 * time.Hour) // get task from queue
+				if err != nil {
+					if err == beanstalk.ErrDeadline { // TODO/FIXME: this does NOT correctly check for a deadline error!
+						log.Warn().Str("component", "IMP").Msgf("WARNING! Thread using socket %v tried to reserve a task from the queue but received DEADLINE SOON error, please handle it!", socket)
+						// TODO: handle deadline soon errors properly!
+					} else {
+						log.Error().Err(err).Str("component", "IMP").Msg("error getting task from task queue")
+					}
+					continue // skip rest of the loop, begin next cycle
+				}
+				log.Trace().Str("component", "IMP").Msgf("received task #: %d, task payload: %d bytes from task queue(s)", id, len(task))
+
+				if handleRequest(conn, task, results) { // if task was successfully handled and result properly submitted
+					err := queueConnection.Delete(id)
+					common.LogOnError(err, "error deleting task from task queue", "IMP")
+					log.Trace().Str("component", "IMP").Msgf("succesfully deleted task #: %v", id)
+				} else { // TODO: put task in failed queue/tube
+					errorCounter <- 1
 				}
 			}
-			log.Fatal().Str("component", "IMP").Msg("message queue consumer closed - critical error, exiting now...")
+			//log.Fatal().Str("component", "IMP").Msg("message queue consumer closed - critical error, exiting now...")
 		}
 	}()
 }
@@ -170,20 +178,6 @@ func init() {
 	}
 	log.Info().Str("component", "IMP").Msgf("number of usable logical CPUs for this IMP: %d", config.ncpuLimit)
 
-	prefetchMultiplier := 100 // default value that can be overwritten with the env variable below
-	if prefetchMultiplierString := os.Getenv("PREFETCHMULTIPLIER"); prefetchMultiplierString != "" {
-		var err error
-		prefetchMultiplier, err = strconv.Atoi(prefetchMultiplierString)
-		common.FailOnError(err, "error parsing PREFETCHMULTIPLIER into an int", "IMP")
-		log.Info().Str("component", "IMP").Msgf("prefetch multiplier has been manually set to %d via env variable PREFETCHMULTIPLIER", prefetchMultiplier)
-	}
-
-	config.prefetchCount = config.ncpuLimit * prefetchMultiplier
-	config.resultBufferSize = config.prefetchCount
-
-	log.Debug().Str("component", "IMP").Msgf("prefetch count for task queue set to %d messages", config.prefetchCount)
-	log.Debug().Str("component", "IMP").Msgf("buffer size for results in internal memory set to %d items", config.resultBufferSize)
-
 	config.errorLimit = 10 // default value that can be overwritten with the env variable below
 	if errorLimitString := os.Getenv("ERRORLIMIT"); errorLimitString != "" {
 		var err error
@@ -193,30 +187,29 @@ func init() {
 	}
 	log.Debug().Str("component", "IMP").Msgf("error limit is set to %d", config.errorLimit)
 
-	amqpHost := os.Getenv("AMQPHOST")
-	amqpPort := os.Getenv("AMQPPORT")
-	amqpUser := os.Getenv("AMQPUSER")
-	amqpPassword := os.Getenv("AMQPPASSWORD")
+	queueHost := os.Getenv("QUEUEHOST")
+	queuePort := os.Getenv("QUEUEPORT")
+
 	config.taskQueueName = os.Getenv("TASKQUEUENAME")
+	config.resultQueueName = os.Getenv("RESULTQUEUENAME")
 	config.servicePath = os.Getenv("SERVICEPATH")
 
-	if amqpHost == "" || amqpUser == "" || amqpPassword == "" || config.taskQueueName == "" || config.servicePath == "" {
-		log.Fatal().Str("component", "IMP").Msg("not all required env variables for an AMQP connection set, exiting now...")
+	if queueHost == "" || queuePort == "" || config.taskQueueName == "" || config.resultQueueName == "" || config.servicePath == "" {
+		log.Fatal().Str("component", "IMP").Msg("not all required env variables for a queue connection set, exiting now...")
 	}
 
-	config.amqpConnectionString = "amqp://" + amqpUser + ":" + amqpPassword + "@" + amqpHost + ":" + amqpPort
+	config.queueConnectionString = queueHost + ":" + queuePort
 }
 
 func main() {
-	taskChannel := queue.CreateConnectionChannel(config.amqpConnectionString, config.prefetchCount)
-	taskQueue := queue.DeclareQueue(taskChannel, config.taskQueueName)
+	taskConnection, err := beanstalk.Dial("tcp", config.queueConnectionString)
+	common.FailOnError(err, "failed to connect to work queue server", "IMP")
 
-	resultChannel := queue.CreateConnectionChannel(config.amqpConnectionString, 0)
+	resultConnection, err := beanstalk.Dial("tcp", config.queueConnectionString)
+	common.FailOnError(err, "failed to connect to work queue server", "IMP")
 
-	msgs := queue.ConsumeOnChannel(taskChannel, taskQueue.Name)
-	// create a buffer queue / go channel to handle all result submissions in a dedicated, central go routine
-	resultsBuffer := make(chan queue.Message, config.prefetchCount) // go channels are lmited to 64 KiB item size, be aware! An unbuffered since publishings are async by default, but this decouples it even more
-	go queue.StartBackgroundPublisher(resultsBuffer, resultChannel)
+	taskTubeSet := beanstalk.NewTubeSet(taskConnection, config.taskQueueName)
+	resultTube := beanstalk.NewTube(resultConnection, config.resultQueueName)
 
 	subprocessCounter := make(chan int)   // go channel to count started subprocesses
 	go subprocessCount(subprocessCounter) // start the goroutine that syncs the count
@@ -228,7 +221,7 @@ func main() {
 	for i := 0; i < config.ncpuLimit; i++ {
 		log.Debug().Str("component", "IMP").Msgf("creating local socket and starting worker for thread %d...", i)
 		socket := getSocketPath("metalcoreTaskSocket", i)
-		createSocketListener(msgs, resultsBuffer, socket, resultChannel)
+		createSocketListener(*taskConnection, *taskTubeSet, *resultTube, socket, errorCounter)
 		// start actual worker binary process here, pass and read parameters/result via socket created above
 		go startSubprocess(config.servicePath, socket, subprocessCounter, errorCounter) // TODO: handle sub-process restarts on errors (use the go channel!)
 	}
