@@ -1,0 +1,25 @@
+services:
+
+  queue:
+    build: ./metalcore-queue
+    image: metalcore-queue:latest
+    ports:
+      - 11300:11300
+    volumes:
+      - type: volume
+        source: binlog
+        target: /queue
+    command: -z 536870912 # sets max job size to 512 MB
+
+  worker:
+    build:
+      context: ../../bin
+      dockerfile: ../build/docker/metalcore-worker/Dockerfile
+    image: metalcore-worker:latest
+    depends_on:
+      - queue
+    environment:
+      QUEUEHOST: queue
+
+volumes:
+  binlog:

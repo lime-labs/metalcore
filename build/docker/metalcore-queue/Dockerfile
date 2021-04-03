@@ -1,9 +1,22 @@
-FROM alpine
+##################### BUILDER #####################
+FROM registry.access.redhat.com/ubi8-minimal as builder
 
-RUN apk add --no-cache beanstalkd
+RUN microdnf update && microdnf clean all
+RUN microdnf install git gcc make && microdnf clean all
+RUN git clone https://github.com/beanstalkd/beanstalkd.git /tmp/beanstalkd && cd /tmp/beanstalkd && make
+
+###################### IMAGE ######################
+FROM registry.access.redhat.com/ubi8-minimal
+
+RUN microdnf update && microdnf clean all
+
+COPY --from=builder /tmp/beanstalkd/beanstalkd /usr/local/bin/
+
+# can be used to store binlogs for persistency
+WORKDIR /queue
+
+VOLUME /queue
 
 EXPOSE 11300
 
-# CMD below will set the max job size to 512 MiB
-ENTRYPOINT ["/usr/bin/beanstalkd"]
-CMD ["-z", "536870912"]
+ENTRYPOINT ["beanstalkd"]

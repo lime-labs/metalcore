@@ -1,12 +1,14 @@
-# choose anything you like as your base
-FROM centos:8
+# choose "almost" anything you like as your base (glibc based distros are easiest to use out-of-the-box)
+FROM registry.access.redhat.com/ubi8-minimal
+
+RUN microdnf update && microdnf clean all
+
+COPY metalcore /usr/local/bin/
 
 WORKDIR /app
 
-COPY bin/metalcore .
-
-# copy your service binary and deps here
-COPY bin/service .
+# copy your service binary and deps here, or mount them via volume
+COPY service .
 
 # ENV parameters
 ENV QUEUEHOST=localhost \
@@ -14,7 +16,12 @@ ENV QUEUEHOST=localhost \
     TASKQUEUENAME=tasks \
     RESULTQUEUENAME=results \
     CONNSHAREFACTOR=1 \
-    SERVICEPATH=./service
+    CPULIMIT="" \
+    ERRORLIMIT="" \
+    LOGLEVEL=info \
+    LOGPRETTYPRINT=off \
+    SERVICEPATH=/app/service
 
-ENTRYPOINT ["/app/metalcore"]
-# CMD ["set other parameters for the entrypoint here. Currently not used in metalcore IMP."]
+VOLUME /app
+
+ENTRYPOINT ["metalcore"]

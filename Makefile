@@ -1,23 +1,27 @@
+.DEFAULT_GOAL := all
+
 build:
 	go build -o bin/metalcore cmd/metalcore/metalcore.go
-
-run:
-	docker run -it --rm --network="host" metalcore-worker
 
 compile:
 	echo "Compiling for every OS and platform:"
 	GOOS=linux GOARCH=amd64 go build -o bin/metalcore cmd/metalcore/metalcore.go
-	GOOS=windows GOARCH=amd64 go build -o bin/metalcore.exe cmd/metalcore/metalcore.go
+	#GOOS=windows GOARCH=amd64 go build -o bin/metalcore.exe cmd/metalcore/metalcore.go
 	#GOOS=linux GOARCH=arm64 go build -o bin/metalcore-imp-arm64 src/imp.go
 	#GOOS=linux GOARCH=arm go build -o bin/metalcore-imp-arm src/imp.go
 	GOOS=linux GOARCH=amd64 go build -o bin/service cmd/service/service.go
-	GOOS=windows GOARCH=amd64 go build -o bin/service.exe cmd/service/service.go
+	#GOOS=windows GOARCH=amd64 go build -o bin/service.exe cmd/service/service.go
 	GOOS=linux GOARCH=amd64 go build -o bin/clientapp cmd/clientapp/clientapp.go
-	GOOS=windows GOARCH=amd64 go build -o bin/clientapp.exe cmd/clientapp/clientapp.go
+	#GOOS=windows GOARCH=amd64 go build -o bin/clientapp.exe cmd/clientapp/clientapp.go
 
 images:
-	docker build -t metalcore-worker -f build/docker/metalcore-worker/Dockerfile .
-	docker build -t metalcore-queue -f build/docker/metalcore-queue/Dockerfile .
+	docker-compose --file build/docker/docker-compose.yml build
+	#docker build -t metalcore-worker -f build/docker/metalcore-worker/Dockerfile bin/
+	#docker build -t metalcore-queue build/docker/metalcore-queue/
+	docker image prune -f
+
+runbareimp:
+	QUEUEHOST=localhost QUEUEPORT=11300 TASKQUEUENAME=tasks RESULTQUEUENAME=results CONNSHAREFACTOR=1 LOGPRETTYPRINT=on SERVICEPATH=bin/service bin/metalcore
 
 container:
 	docker run --rm --network=host --env LOGPRETTYPRINT=on -it metalcore-worker
@@ -25,25 +29,27 @@ container:
 containerdebug:
 	docker run --rm --network=host --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-worker
 
+containershell:
+	docker run --rm --network=host --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-worker /bin/sh
+
 containerdaemon:
 	echo "starting a new container with a random name..."
 	docker run -d --rm --network="host" metalcore-worker
 	docker ps -l
 
 queue:
-	docker run -d --rm --network=host --name=metalcore-queue metalcore-queue
+	docker run -d --rm -p=11300:11300 --name=metalcore-queue metalcore-queue -z 536870912
 
-# ugly way to create a bunch of containers without k8s/k3s/swarm
-NUMBERS := 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100
-startfakecluster:
-	$(foreach var,$(NUMBERS),docker run -d --rm --network="host" --name metalcore-worker-$(var) metalcore-worker;)
-	docker ps
+benchmark:
+	bin/clientapp -tasks=100000 -size=0 -pretty -parallel=4
 
-stopfakecluster:
-	docker ps --format '{{.Names}}' | grep "^metalcore-worker-" | awk '{print $1}' | xargs -I {} docker stop {}
-	docker ps
+up:
+	docker-compose --file build/docker/docker-compose.yml --project-name metalcore up --detach --scale worker=3
 
-clean:
+down:
+	docker-compose --file build/docker/docker-compose.yml --project-name metalcore down --volumes
+
+clean: down
 	rm -f bin/*
 	go mod tidy
 

@@ -45,7 +45,7 @@ func Reader(r io.Reader, comp string) []byte {
 // Writer...
 func Writer(w io.Writer, data []byte, comp string) {
 	payloadSize := uint64(len(data))
-	err := binary.Write(w, binary.LittleEndian, &payloadSize)
+	err := binary.Write(w, binary.LittleEndian, payloadSize)
 	LogOnError(err, "error sending result header to socket", comp)
 	log.Trace().Str("component", comp).Msgf("%v sent header via socket, payload size is %d bytes", comp, payloadSize)
 
