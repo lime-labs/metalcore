@@ -5,19 +5,22 @@ import (
 	"os"
 	"time"
 
+	api "github.com/lime-labs/metalcore/api/v1"
 	"github.com/lime-labs/metalcore/internal/pkg/common"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/proto"
 )
 
-func sleepms(data []byte) []byte {
-	// durationInt, err := strconv.Atoi(string(data)) // need to convert to string first, currently raw serialization from/to strings
-	// common.LogOnErrorShort(err, "error converting task payload to int, will be sleeping for 0s as a result...", "service")
-	durationInt := 0 // TODO: remove the hardcoded value once protobuf is in place to read the proper value from the payload!
+func deserializeTask(data []byte) (task *api.Task, err error) {
+	task = &api.Task{}
+	err = proto.Unmarshal(data, task)
+	return
+}
+
+func sleepms(durationInt int32) []byte {
 	duration := time.Millisecond * time.Duration(durationInt)
-
 	time.Sleep(duration) // the actual task at hand
-
 	result := "worker process slept for " + duration.String()
 	log.Trace().Str("component", "service").Msgf("sub-process instance calculated result: %v", result)
 	return []byte(result)
@@ -49,8 +52,13 @@ func main() {
 	defer socketConnection.Close()
 
 	for {
-		data := common.Reader(socketConnection, "service") // reader(c)       // GET TASK
-		result := sleepms(data)                            // DO STUFF
-		common.Writer(socketConnection, result, "service") // writer(c, result)                   // DONE
+		data := common.Reader(socketConnection, "service") // GET DATA
+
+		task, err := deserializeTask(data) // DESERIALIZE DATA
+		common.LogOnError(err, "failed to deserialize task", "service")
+		log.Trace().Str("component", "service").Msgf("received task: %d, session: %v, sleep duration: %d, payload size: %d bytes", task.Id, task.Session, task.Sleepduration, len(task.Payload))
+
+		result := sleepms(task.Sleepduration)              // DO STUFF
+		common.Writer(socketConnection, result, "service") // DONE
 	}
 }

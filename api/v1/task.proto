@@ -1,0 +1,14 @@
+syntax = "proto3";
+package task.v1;
+option go_package = "github.com/lime-labs/metalcore/api/task_v1";
+
+message Task {
+    int32 id = 1;
+    string session = 2;
+    int32 sleepduration = 3;
+    bytes payload = 4;
+}
+
+message Batch {
+    repeated Task tasks = 1;
+}

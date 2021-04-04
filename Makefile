@@ -3,6 +3,9 @@
 build:
 	go build -o bin/metalcore cmd/metalcore/metalcore.go
 
+proto:
+	protoc api/v1/*.proto --go_out=. --go_opt=paths=source_relative --proto_path=.
+
 compile:
 	echo "Compiling for every OS and platform:"
 	GOOS=linux GOARCH=amd64 go build -o bin/metalcore cmd/metalcore/metalcore.go
@@ -26,7 +29,7 @@ runbareimp:
 container:
 	docker run --rm --network=host --env LOGPRETTYPRINT=on -it metalcore-worker
 
-containerdebug:
+containertrace:
 	docker run --rm --network=host --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-worker
 
 containershell:
@@ -41,7 +44,10 @@ queue:
 	docker run -d --rm -p=11300:11300 --name=metalcore-queue metalcore-queue -z 536870912
 
 benchmark:
-	bin/clientapp -tasks=100000 -size=0 -pretty -parallel=4
+	bin/clientapp -tasks=100000 -size=0 -sleep=0 -pretty -parallel=4
+
+clienttrace:
+	bin/clientapp -tasks=100 -size=1024 -sleep=20 -pretty -parallel=1 -loglevel=trace
 
 up:
 	docker-compose --file build/docker/docker-compose.yml --project-name metalcore up --detach --scale worker=3

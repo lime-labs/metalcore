@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/beanstalkd/go-beanstalk"
+	api "github.com/lime-labs/metalcore/api/v1"
 	"github.com/lime-labs/metalcore/internal/pkg/common"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/proto"
 )
 
 func throughputCount(channel <-chan float64, threads int, purpose string, wg *sync.WaitGroup) {
@@ -29,6 +31,29 @@ func throughputCount(channel <-chan float64, threads int, purpose string, wg *sy
 	}
 }
 
+func serializeTask(taskID int, sessionID string, sleepduration int, payload []byte) (data []byte, err error) {
+	task := &api.Task{
+		Id:            int32(taskID),
+		Session:       sessionID,
+		Sleepduration: int32(sleepduration),
+		Payload:       payload,
+	}
+
+	data, err = proto.Marshal(task)
+	return
+}
+
+func createTask(taskID int, sessionID string, sleepduration int, payload []byte) *api.Task {
+	task := &api.Task{
+		Id:            int32(taskID),
+		Session:       sessionID,
+		Sleepduration: int32(sleepduration),
+		Payload:       payload,
+	}
+
+	return task
+}
+
 func main() {
 	clientStartTime := time.Now()
 
@@ -40,7 +65,7 @@ func main() {
 	taskQueuePtr := flag.String("taskqueue", "tasks", "name of the task queue to use")
 	resultQueuePtr := flag.String("resultqueue", "results", "name of the result queue to use")
 	queueServerPtr := flag.String("server", "127.0.0.1:11300", "Hostname / FQDN / IP and port of queue server to use")
-	//sessionPtr := flag.String("session", "metalcore-client-app/123456789", "name of the session identifier to use")
+	sessionPtr := flag.String("session", "metalcore-client-app/123456789", "name of the session identifier to use")
 	logLevelPtr := flag.String("loglevel", "info", "set this to debug or trace to enable more verbose log outputs [slows down performance!]")
 	prettyLogPtr := flag.Bool("pretty", false, "set this flag to enable human readable output of the log [otherwise JSON format will be used]")
 	flag.Parse()
@@ -57,9 +82,6 @@ func main() {
 	if *prettyLogPtr {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 	}
-
-	//hostname, err := os.Hostname()
-	//common.FailOnError(err, "failed to get hostname", "client")
 
 	taskQueueName := *taskQueuePtr
 	resultQueueName := *resultQueuePtr
@@ -97,10 +119,17 @@ func main() {
 			log.Debug().Str("component", "client").Msgf("starting publishing thread %d on client, submitting %d tasks to task queue %s...", counter, tasksPerThread, taskQueueName)
 
 			start := time.Now()
+
+			// batch := &api.Batch{}
+			// batch.Tasks = append(batch.Tasks, task)
+
 			for j := 0; j < tasksPerThread; j++ {
-				id, err := taskTube.Put(payload, 1, 0, 5*time.Second) // publish task with random fake payload
+				task, err := serializeTask(j, *sessionPtr, *sleepPtr, payload) // serialize task with payload and metadata
+				common.LogOnError(err, "failed to serialize task", "client")
+
+				id, err := taskTube.Put(task, 1, 0, 5*time.Second) // publish task
 				common.LogOnError(err, "error putting task on task queue", "client")
-				log.Trace().Str("component", "client").Msgf("submitted task #: %v, task payload: %v", id, sleepDuration)
+				log.Trace().Str("component", "client").Msgf("submitted task #: %v, task payload: %v", id, sleepDuration) // TODO: change "task" id to queue job ID to prevent misinterpretation
 			}
 			putDuration := time.Since(start)
 			log.Debug().Str("component", "client").Msgf("thread %d DONE publishing tasks to task queue, total runtime: %v", counter, putDuration.String())
