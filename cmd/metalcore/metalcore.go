@@ -13,6 +13,10 @@ import (
 	"github.com/lime-labs/metalcore/internal/pkg/common"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
+	api "github.com/lime-labs/metalcore/api/v1"
+	"google.golang.org/protobuf/proto"
+
 	"go.uber.org/automaxprocs/maxprocs" // currently needed since cgroup CPU limits are not mapped to GOMAXPROCS automatically without it
 )
 
@@ -26,40 +30,31 @@ var config struct {
 	servicePath           string
 }
 
-// remove once protobuf is in place
-type message struct {
-	MessageID     string
-	SessionID     string
-	CorrelationID string
-	Queue         string
-	ReplyTo       string
-	Payload       []byte
-}
-
 type queueConn struct {
 	taskConn *beanstalk.Conn
-	tasks    *beanstalk.TubeSet
+	batches  *beanstalk.TubeSet
 	results  *beanstalk.Tube
 }
 
-func startSubprocess(pathToBinary string, socket string, subprocessCounter chan<- int, errorCounter chan<- int) {
-	log.Debug().Str("component", "IMP").Msgf("starting sub-process %v with socket %v", pathToBinary, socket)
+func startSubprocess(pathToBinary string, socket net.Listener, subprocessCounter chan<- int, errorCounter chan<- int) {
+	log.Debug().Str("component", "IMP").Msgf("starting sub-process %v with socket %v", pathToBinary, socket.Addr().String())
 
 	cmd := exec.Command(pathToBinary)
 
 	cmd.Env = os.Environ() // provide env variables from parent process to sub-process
-	cmd.Env = append(cmd.Env, "METALCORESOCKET="+socket)
+	cmd.Env = append(cmd.Env, "METALCORESOCKETTYPE="+socket.Addr().Network())
+	cmd.Env = append(cmd.Env, "METALCORESOCKETADDR="+socket.Addr().String())
 
 	cmd.Stdout = os.Stdout // pass stdout...
 	cmd.Stderr = os.Stderr // ...and stderr to parent process
 
 	err := cmd.Start()
 	if err != nil {
-		log.Error().Err(err).Str("component", "IMP").Msgf("error starting sub-process with socket %v", socket)
+		log.Error().Err(err).Str("component", "IMP").Msgf("error starting sub-process with socket %v", socket.Addr().String())
 		errorCounter <- 1 // increase error counter channel by 1
 	} else {
 		subprocessCounter <- 1 // increase sub-process counter channel by 1
-		log.Debug().Str("component", "IMP").Msgf("successfully started sub-process %v with socket %v", pathToBinary, socket)
+		log.Debug().Str("component", "IMP").Msgf("successfully started sub-process %v with socket %v", pathToBinary, socket.Addr().String())
 		log.Debug().Str("component", "IMP").Msg("waiting for sub-process to finish / exit...")
 		err = cmd.Wait() // this blocks until the process exits (gracefully or not)
 		if err != nil {
@@ -70,7 +65,7 @@ func startSubprocess(pathToBinary string, socket string, subprocessCounter chan<
 	}
 }
 
-func handleRequest(socketConnection net.Conn, task []byte, results beanstalk.Tube) bool {
+func handleRequest(socketConnection net.Conn, task []byte, results *beanstalk.Tube) bool {
 	common.Writer(socketConnection, task, "IMP")            // send task to sub-process
 	resultPayload := common.Reader(socketConnection, "IMP") // receive result from sub-process
 
@@ -83,54 +78,68 @@ func handleRequest(socketConnection net.Conn, task []byte, results beanstalk.Tub
 	return true
 }
 
-func getSocketPath(socketName string, number int) string {
-	osTempDir := os.TempDir()
-	name := socketName + strconv.Itoa(number) + ".sock"
-	return filepath.Join(osTempDir, name)
-}
+func createSocket(number int) net.Listener {
+	socketPath := filepath.Join(os.TempDir(), "metalcore"+strconv.Itoa(number)+".sock")
 
-func createSocketListener(queueConnection beanstalk.Conn, tasks beanstalk.TubeSet, results beanstalk.Tube, socket string, errorCounter chan<- int) {
-	log.Debug().Str("component", "IMP").Msgf("creating UNIX domain socket at %s", socket)
-
-	err := os.RemoveAll(socket)
+	err := os.RemoveAll(socketPath)
 	common.FailOnError(err, "failed to remove existing sockets", "IMP")
 
-	l, err := net.Listen("unix", socket)
-	common.FailOnError(err, "socket listen error", "IMP")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		common.LogOnError(err, "local UNIX socket listen error, will fallback on TCP with random (free) port...", "IMP")
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		common.FailOnError(err, "local TCP socket listen error, exiting now...", "IMP")
+	}
 
-	go func() {
-		defer l.Close()
+	log.Debug().Str("component", "IMP").Msgf("Created local IPC socket for thread #%d. Type: %v, address: %v", number, listener.Addr().Network(), listener.Addr().String())
+	return listener
+}
+
+func startBatchConsumer(connCollection queueConn, socket net.Listener, errorCounter chan<- int) {
+	queueConnection := connCollection.taskConn
+	batches := connCollection.batches
+	results := connCollection.results
+
+	defer socket.Close()
+	for {
+		conn, err := socket.Accept()
+		common.FailOnError(err, "accept error", "IMP")
+
+		log.Debug().Str("component", "IMP").Msgf("client sub-process connected via [%s] on socket %s", conn.RemoteAddr().Network(), socket.Addr().String())
 
 		for {
-			conn, err := l.Accept()
-			common.FailOnError(err, "accept error", "IMP")
-
-			log.Debug().Str("component", "IMP").Msgf("client sub-process connected via [%s] on socket %s", conn.RemoteAddr().Network(), socket)
-
-			for {
-				id, task, err := tasks.Reserve(1 * time.Hour) // get task from queue
-				if err != nil {
-					if err == beanstalk.ErrDeadline { // TODO/FIXME: this does NOT correctly check for a deadline error!
-						log.Warn().Str("component", "IMP").Msgf("WARNING! Thread using socket %v tried to reserve a task from the queue but received DEADLINE SOON error, please handle it!", socket)
-						// TODO: handle deadline soon errors properly!
-					} else {
-						log.Error().Err(err).Str("component", "IMP").Msg("error getting task from task queue")
-					}
-					continue // skip rest of the loop, begin next cycle
+			id, batchFromQueue, err := batches.Reserve(1 * time.Hour) // get batch from queue
+			if err != nil {
+				if err == beanstalk.ErrDeadline { // TODO/FIXME: this does NOT correctly check for a deadline error!
+					log.Warn().Str("component", "IMP").Msgf("WARNING! Thread using socket %v tried to reserve a batch from the queue but received DEADLINE SOON error, please handle it!", socket)
+					// TODO: handle deadline soon errors properly!
+				} else {
+					log.Error().Err(err).Str("component", "IMP").Msg("error getting batch from task queue")
 				}
-				log.Trace().Str("component", "IMP").Msgf("received task #: %d, task payload: %d bytes from task queue(s)", id, len(task))
+				continue // skip rest of the loop, begin next cycle
+			}
+			log.Trace().Str("component", "IMP").Msgf("received batch #: %d, batch payload: %d bytes from batch queue(s)", id, len(batchFromQueue))
 
-				if handleRequest(conn, task, results) { // if task was successfully handled and result properly submitted
-					err := queueConnection.Delete(id)
-					common.LogOnError(err, "error deleting task from task queue", "IMP")
-					log.Trace().Str("component", "IMP").Msgf("succesfully deleted task #: %v", id)
-				} else { // TODO: put task in failed queue/tube
+			batch := &api.Batch{}
+			err = proto.Unmarshal(batchFromQueue, batch)
+			common.LogOnError(err, "error while deserializing batch received from queue", "IMP")
+
+			for _, task := range batch.Tasks {
+				log.Trace().Str("component", "IMP").Msgf("task payload size sent to socket: %d bytes", len(task.Payload))
+
+				if handleRequest(conn, task.Payload, results) { // if task was successfully handled and result properly submitted
+					// TODO: do something meaningful here while still inside the batch loop (batch results together, handle errors, increase a success counter or something else)
+				} else {
+					// TODO: put batch/task in failed queue/tube
 					errorCounter <- 1
 				}
-			}
-			//log.Fatal().Str("component", "IMP").Msg("message queue consumer closed - critical error, exiting now...")
+			} // batch done
+			err = queueConnection.Delete(id)
+			common.LogOnError(err, "error deleting batch from task queue", "IMP")
+			log.Trace().Str("component", "IMP").Msgf("succesfully deleted batch #: %v", id)
 		}
-	}()
+		//log.Fatal().Str("component", "IMP").Msg("batch queue consumer closed - critical error, exiting now...")
+	}
 }
 
 func subprocessCount(channel <-chan int) {
@@ -155,7 +164,7 @@ func errorCount(channel <-chan int) {
 	}
 }
 
-func createQueueConnectionsAndTubes(connString string, taskQueueName string, resultQueueName string) (queueConnInstance queueConn) {
+func createQueueConnectionsAndTubes(connString string, batchQueueName string, resultQueueName string) (queueConnInstance queueConn) {
 	var err error
 	queueConnInstance.taskConn, err = beanstalk.Dial("tcp", connString)
 	common.FailOnError(err, "failed to connect to work queue server", "IMP")
@@ -163,7 +172,7 @@ func createQueueConnectionsAndTubes(connString string, taskQueueName string, res
 	resultConn, err := beanstalk.Dial("tcp", connString)
 	common.FailOnError(err, "failed to connect to work queue server", "IMP")
 
-	queueConnInstance.tasks = beanstalk.NewTubeSet(queueConnInstance.taskConn, taskQueueName)
+	queueConnInstance.batches = beanstalk.NewTubeSet(queueConnInstance.taskConn, batchQueueName)
 	queueConnInstance.results = beanstalk.NewTube(resultConn, resultQueueName)
 
 	return
@@ -237,20 +246,19 @@ func main() {
 	errorCounter := make(chan int)        // go channel to count errors happening during sub-process execution
 	go errorCount(errorCounter)           // start the goroutine that syncs the error count
 
-	connMap := make(map[int]queueConn)
-	var connIndex int
+	var connections []queueConn // "collect" connection tuples to be referenced for sharing, if desired (default: 2 connections per thread, not shared)
 
 	// create a go routine for each concurrent thread requested
 	log.Info().Str("component", "IMP").Msgf("starting %d worker instances of service %v...", config.ncpuLimit, config.servicePath)
 	for i := 0; i < config.ncpuLimit; i++ {
 		log.Debug().Str("component", "IMP").Msgf("creating local socket and starting worker for thread %d...", i)
-		socket := getSocketPath("metalcoreTaskSocket", i)
-		connIndex = i / config.connShareFactor // 1 connection will be shared by connShareFactor threads
+		socket := createSocket(i)
+		connectionIndex := i / config.connShareFactor // 1 connection tuple will be shared by connShareFactor threads
 		if i%config.connShareFactor == 0 {
-			log.Debug().Str("component", "IMP").Msgf("creating task and result queue connection instance #%d...", connIndex)
-			connMap[connIndex] = createQueueConnectionsAndTubes(config.queueConnectionString, config.taskQueueName, config.resultQueueName)
+			log.Debug().Str("component", "IMP").Msgf("creating task and result queue connection instance #%d...", connectionIndex)
+			connections = append(connections, createQueueConnectionsAndTubes(config.queueConnectionString, config.taskQueueName, config.resultQueueName))
 		}
-		createSocketListener(*connMap[connIndex].taskConn, *connMap[connIndex].tasks, *connMap[connIndex].results, socket, errorCounter)
+		go startBatchConsumer(connections[connectionIndex], socket, errorCounter)
 		go startSubprocess(config.servicePath, socket, subprocessCounter, errorCounter) // TODO: handle sub-process restarts on errors (use the go channel!)
 	}
 

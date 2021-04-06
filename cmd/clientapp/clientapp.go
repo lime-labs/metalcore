@@ -31,27 +31,28 @@ func throughputCount(channel <-chan float64, threads int, purpose string, wg *sy
 	}
 }
 
-func serializeTask(taskID int, sessionID string, sleepduration int, payload []byte) (data []byte, err error) {
+func createTask(taskID int, sessionID string, payload []byte) *api.Task {
 	task := &api.Task{
-		Id:            int32(taskID),
-		Session:       sessionID,
-		Sleepduration: int32(sleepduration),
-		Payload:       payload,
-	}
-
-	data, err = proto.Marshal(task)
-	return
-}
-
-func createTask(taskID int, sessionID string, sleepduration int, payload []byte) *api.Task {
-	task := &api.Task{
-		Id:            int32(taskID),
-		Session:       sessionID,
-		Sleepduration: int32(sleepduration),
-		Payload:       payload,
+		Id:      int32(taskID),
+		Session: sessionID,
+		Payload: payload,
 	}
 
 	return task
+}
+
+func createSleepExampleTaskData(sleepduration int, fakepayload []byte) []byte {
+	sleepTask := &api.SleepExample{
+		Sleepduration: int32(sleepduration),
+		Fakepayload:   fakepayload,
+	}
+
+	// serialize and submit batch to queue
+	data, err := proto.Marshal(sleepTask)
+	common.LogOnError(err, "failed to serialize sleep example task", "client")
+	log.Trace().Str("component", "client").Msgf("total sleep task size: %d bytes", len(data))
+
+	return data
 }
 
 func main() {
@@ -62,6 +63,7 @@ func main() {
 	taskNumPtr := flag.Int("tasks", 10000, "number of tasks to send to the queue")
 	sizePtr := flag.Int("size", 1024, "number of bytes to use as fake payload")
 	parallelPtr := flag.Int("parallel", 1, "number of threads and TCP connections for task submission and retrieval to spawn")
+	batchSizePtr := flag.Int("batch", 1, "number of tasks to batch together to submit per queue request")
 	taskQueuePtr := flag.String("taskqueue", "tasks", "name of the task queue to use")
 	resultQueuePtr := flag.String("resultqueue", "results", "name of the result queue to use")
 	queueServerPtr := flag.String("server", "127.0.0.1:11300", "Hostname / FQDN / IP and port of queue server to use")
@@ -96,8 +98,8 @@ func main() {
 	}
 	log.Info().Str("component", "client").Msgf("starting %d threads for submitting %d tasks and %d threads for retrieving the results, please stand by...", *parallelPtr, *taskNumPtr-remainder, *parallelPtr)
 
-	payload := make([]byte, *sizePtr)
-	rand.Read(payload)
+	fakePayload := make([]byte, *sizePtr)
+	rand.Read(fakePayload)
 	log.Info().Str("component", "client").Msgf("fake payload size set to %d bytes of random data", *sizePtr)
 
 	var wg sync.WaitGroup
@@ -118,21 +120,36 @@ func main() {
 
 			log.Debug().Str("component", "client").Msgf("starting publishing thread %d on client, submitting %d tasks to task queue %s...", counter, tasksPerThread, taskQueueName)
 
-			start := time.Now()
+			start := time.Now() ///////////////////////////////// START
 
-			// batch := &api.Batch{}
-			// batch.Tasks = append(batch.Tasks, task)
+			for taskCounter := 0; taskCounter < tasksPerThread; {
 
-			for j := 0; j < tasksPerThread; j++ {
-				task, err := serializeTask(j, *sessionPtr, *sleepPtr, payload) // serialize task with payload and metadata
-				common.LogOnError(err, "failed to serialize task", "client")
+				batch := &api.Batch{}
 
-				id, err := taskTube.Put(task, 1, 0, 5*time.Second) // publish task
-				common.LogOnError(err, "error putting task on task queue", "client")
-				log.Trace().Str("component", "client").Msgf("submitted task #: %v, task payload: %v", id, sleepDuration) // TODO: change "task" id to queue job ID to prevent misinterpretation
+				for b := 0; b < *batchSizePtr; b++ {
+
+					sleepTaskPayloadData := createSleepExampleTaskData(*sleepPtr, fakePayload)
+					task := createTask(taskCounter, *sessionPtr, sleepTaskPayloadData) // create task with payload and metadata
+					batch.Tasks = append(batch.Tasks, task)
+
+					taskCounter++
+					if taskCounter == tasksPerThread {
+						break // if the batch can't be filled because all tasks for this thread are already created
+					}
+				}
+
+				// serialize and submit batch to queue
+				data, err := proto.Marshal(batch)
+				common.LogOnError(err, "failed to serialize batch", "client")
+				log.Trace().Str("component", "client").Msgf("total batch size: %d bytes", len(data))
+
+				id, err := taskTube.Put(data, 1, 0, 5*time.Second) // publish batch
+				common.LogOnError(err, "error putting batch on task queue", "client")
+				log.Trace().Str("component", "client").Msgf("submitted batch #: %v, task sleep duration: %v", id, sleepDuration)
 			}
-			putDuration := time.Since(start)
-			log.Debug().Str("component", "client").Msgf("thread %d DONE publishing tasks to task queue, total runtime: %v", counter, putDuration.String())
+
+			putDuration := time.Since(start) ////////////////////////////////////// DONE
+			log.Debug().Str("component", "client").Msgf("thread %d DONE publishing batches to queue, total runtime: %v", counter, putDuration.String())
 
 			throughput := float64(*taskNumPtr) / float64(putDuration) * float64(time.Second)
 			log.Debug().Str("component", "client").Msgf("task submission rate of thread %d: %.2f tasks/sec", counter, throughput)

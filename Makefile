@@ -24,7 +24,7 @@ images:
 	docker image prune -f
 
 runbareimp:
-	QUEUEHOST=localhost QUEUEPORT=11300 TASKQUEUENAME=tasks RESULTQUEUENAME=results CONNSHAREFACTOR=1 LOGPRETTYPRINT=on SERVICEPATH=bin/service bin/metalcore
+	QUEUEHOST=localhost QUEUEPORT=11300 TASKQUEUENAME=tasks RESULTQUEUENAME=results CONNSHAREFACTOR=1 LOGLEVEL=trace LOGPRETTYPRINT=on SERVICEPATH=bin/service bin/metalcore
 
 container:
 	docker run --rm --network=host --env LOGPRETTYPRINT=on -it metalcore-worker
@@ -44,7 +44,7 @@ queue:
 	docker run -d --rm -p=11300:11300 --name=metalcore-queue metalcore-queue -z 536870912
 
 benchmark:
-	bin/clientapp -tasks=100000 -size=0 -sleep=0 -pretty -parallel=4
+	bin/clientapp -pretty -tasks=100000 -size=0 -sleep=0 -parallel=4 -batch=1
 
 clienttrace:
 	bin/clientapp -tasks=100 -size=1024 -sleep=20 -pretty -parallel=1 -loglevel=trace
@@ -59,4 +59,4 @@ clean: down
 	rm -f bin/*
 	go mod tidy
 
-all: clean compile images
+all: clean proto compile images

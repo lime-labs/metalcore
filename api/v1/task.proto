@@ -5,10 +5,14 @@ option go_package = "github.com/lime-labs/metalcore/api/task_v1";
 message Task {
     int32 id = 1;
     string session = 2;
-    int32 sleepduration = 3;
-    bytes payload = 4;
+    bytes payload = 3;
 }
 
 message Batch {
     repeated Task tasks = 1;
+}
+
+message SleepExample {
+    int32 sleepduration = 1;
+    bytes fakepayload = 2;
 }
