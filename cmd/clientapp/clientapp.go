@@ -19,13 +19,16 @@ import (
 func throughputCount(channel <-chan float64, threads int, purpose string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var total float64
-	count := 0
+	var count int
+
+	start := time.Now()
 	for value := range channel { // endlessly listen for values to be added / subtracted from the count
 		log.Trace().Str("component", "client").Msgf("received value of %v throughput increase/decrease: %.2f", purpose, value)
 		total += value
 		count++
 		if count == threads {
-			log.Info().Str("component", "client").Msgf("total %v throughput using %d threads: %.2f tasks/sec", purpose, threads, total)
+			duration := time.Since(start)
+			log.Info().Str("component", "client").Msgf("%v done in %v. Total throughput using %d threads: %.2f tasks/sec", purpose, duration.String(), threads, total)
 			break
 		}
 	}
@@ -127,7 +130,6 @@ func main() {
 				batch := &api.Batch{}
 
 				for b := 0; b < *batchSizePtr; b++ {
-
 					sleepTaskPayloadData := createSleepExampleTaskData(*sleepPtr, fakePayload)
 					task := createTask(taskCounter, *sessionPtr, sleepTaskPayloadData) // create task with payload and metadata
 					batch.Tasks = append(batch.Tasks, task)
@@ -151,7 +153,7 @@ func main() {
 			putDuration := time.Since(start) ////////////////////////////////////// DONE
 			log.Debug().Str("component", "client").Msgf("thread %d DONE publishing batches to queue, total runtime: %v", counter, putDuration.String())
 
-			throughput := float64(*taskNumPtr) / float64(putDuration) * float64(time.Second)
+			throughput := float64(tasksPerThread) / float64(putDuration) * float64(time.Second)
 			log.Debug().Str("component", "client").Msgf("task submission rate of thread %d: %.2f tasks/sec", counter, throughput)
 			submissionThroughputCounter <- throughput
 		}(p)
@@ -181,8 +183,8 @@ func main() {
 			getDuration := time.Since(start)
 			log.Debug().Str("component", "client").Msgf("thread %d DONE retrieving %d results from result queue, total runtime: %v", counter, tasksPerThread, getDuration.String())
 
-			throughput := float64(*taskNumPtr) / float64(getDuration) * float64(time.Second)
-			log.Debug().Str("component", "client").Msgf("result retrieval rate of thread %d: %.2f tasks/sec", counter, throughput)
+			throughput := float64(tasksPerThread) / float64(getDuration) * float64(time.Second)
+			log.Debug().Str("component", "client").Msgf("result retrieval rate of thread %d: %.2f results/sec", counter, throughput)
 			resultThroughputCounter <- throughput
 		}(p)
 	}
