@@ -9,6 +9,7 @@ linux:
 	GOOS=linux GOARCH=amd64 go build -o bin/clientapp cmd/clientapp/clientapp.go
 
 windows:
+	@echo '$$env:QUEUEHOST="localhost"; $$env:QUEUEPORT="11300"; $$env:LOGLEVEL="trace"; $$env:LOGPRETTYPRINT="on"; $$env:TASKQUEUENAME="tasks"; $$env:RESULTQUEUENAME="results"; $$env:SERVICEPATH=".\service.exe"; .\metalcore.exe' > bin/metalcore.ps1
 	GOOS=windows GOARCH=amd64 go build -o bin/metalcore.exe cmd/metalcore/metalcore.go
 	GOOS=windows GOARCH=amd64 go build -o bin/service.exe cmd/service/service.go
 	GOOS=windows GOARCH=amd64 go build -o bin/clientapp.exe cmd/clientapp/clientapp.go
