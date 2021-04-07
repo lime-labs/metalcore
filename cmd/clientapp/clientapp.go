@@ -106,11 +106,9 @@ func main() {
 	log.Info().Str("component", "client").Msgf("fake payload size set to %d bytes of random data", *sizePtr)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	submissionThroughputCounter := make(chan float64)                                     // go channel to count submission throughput
+	submissionThroughputCounter := make(chan float64) // go channel to count submission throughput
+	wg.Add(1)
 	go throughputCount(submissionThroughputCounter, *parallelPtr, "task submission", &wg) // start the goroutine that syncs the count
-	resultThroughputCounter := make(chan float64)                                         // go channel to count result throughput
-	go throughputCount(resultThroughputCounter, *parallelPtr, "result retrieval", &wg)    // start the goroutine that syncs the count
 
 	for p := 0; p < *parallelPtr; p++ {
 		wg.Add(1)
@@ -158,6 +156,10 @@ func main() {
 			submissionThroughputCounter <- throughput
 		}(p)
 	}
+
+	resultThroughputCounter := make(chan float64) // go channel to count result throughput
+	wg.Add(1)
+	go throughputCount(resultThroughputCounter, *parallelPtr, "result retrieval", &wg) // start the goroutine that syncs the count
 
 	for p := 0; p < *parallelPtr; p++ {
 		wg.Add(1)

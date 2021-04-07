@@ -86,12 +86,12 @@ func createSocket(number int) net.Listener {
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		common.LogOnError(err, "local UNIX socket listen error, will fallback on TCP with random (free) port...", "IMP")
+		log.Warn().Str("component", "IMP").Msg("local UNIX socket listen error, will fallback on local TCP with a random (free) port...")
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
 		common.FailOnError(err, "local TCP socket listen error, exiting now...", "IMP")
 	}
 
-	log.Debug().Str("component", "IMP").Msgf("Created local IPC socket for thread #%d. Type: %v, address: %v", number, listener.Addr().Network(), listener.Addr().String())
+	log.Debug().Str("component", "IMP").Msgf("created local IPC socket for thread #%d. Type: %v, address: %v", number, listener.Addr().Network(), listener.Addr().String())
 	return listener
 }
 

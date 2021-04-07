@@ -1,21 +1,29 @@
 .DEFAULT_GOAL := all
 
-build:
-	go build -o bin/metalcore cmd/metalcore/metalcore.go
-
 proto:
 	protoc api/v1/*.proto --go_out=. --go_opt=paths=source_relative --proto_path=.
 
-compile:
-	echo "Compiling for every OS and platform:"
+linux:
 	GOOS=linux GOARCH=amd64 go build -o bin/metalcore cmd/metalcore/metalcore.go
-	#GOOS=windows GOARCH=amd64 go build -o bin/metalcore.exe cmd/metalcore/metalcore.go
-	#GOOS=linux GOARCH=arm64 go build -o bin/metalcore-imp-arm64 src/imp.go
-	#GOOS=linux GOARCH=arm go build -o bin/metalcore-imp-arm src/imp.go
 	GOOS=linux GOARCH=amd64 go build -o bin/service cmd/service/service.go
-	#GOOS=windows GOARCH=amd64 go build -o bin/service.exe cmd/service/service.go
 	GOOS=linux GOARCH=amd64 go build -o bin/clientapp cmd/clientapp/clientapp.go
-	#GOOS=windows GOARCH=amd64 go build -o bin/clientapp.exe cmd/clientapp/clientapp.go
+
+windows:
+	GOOS=windows GOARCH=amd64 go build -o bin/metalcore.exe cmd/metalcore/metalcore.go
+	GOOS=windows GOARCH=amd64 go build -o bin/service.exe cmd/service/service.go
+	GOOS=windows GOARCH=amd64 go build -o bin/clientapp.exe cmd/clientapp/clientapp.go
+
+arm64:
+	GOOS=linux GOARCH=arm64 go build -o bin/metalcore-imp-arm64 cmd/metalcore/metalcore.go
+	GOOS=linux GOARCH=arm64 go build -o bin/service-imp-arm64 cmd/service/service.go
+	GOOS=linux GOARCH=arm64 go build -o bin/clientapp-imp-arm64 cmd/clientapp/clientapp.go
+
+arm:
+	GOOS=linux GOARCH=arm go build -o bin/metalcore-imp-arm cmd/metalcore/metalcore.go
+	GOOS=linux GOARCH=arm go build -o bin/service-imp-arm cmd/service/service.go
+	GOOS=linux GOARCH=arm go build -o bin/clientapp-imp-arm cmd/clientapp/clientapp.go
+
+buildallosarch: proto linux windows arm arm64
 
 images:
 	docker-compose --file build/docker/docker-compose.yml build
@@ -59,4 +67,4 @@ clean: down
 	rm -f bin/*
 	go mod tidy
 
-all: clean proto compile images
+all: clean proto linux images
