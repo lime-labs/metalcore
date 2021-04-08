@@ -1,14 +1,14 @@
-# choose "almost" anything you like as your base (glibc based distros are easiest to use out-of-the-box)
-FROM registry.access.redhat.com/ubi8-minimal
+# FROM mcr.microsoft.com/windows/servercore:ltsc2019
+FROM mcr.microsoft.com/windows/nanoserver:20H2
 
-RUN microdnf update && microdnf clean all
+RUN mkdir c:\\metalcore
 
-COPY metalcore /usr/local/bin/
+COPY metalcore.exe c:\\metalcore\\.
 
-WORKDIR /app
+WORKDIR c:\\app
 
 # copy your service binary and deps here, or mount them via volume
-COPY service .
+COPY service.exe .
 
 # ENV parameters
 ENV QUEUEHOST=localhost \
@@ -20,6 +20,6 @@ ENV QUEUEHOST=localhost \
     ERRORLIMIT="" \
     LOGLEVEL=info \
     LOGPRETTYPRINT=off \
-    SERVICEPATH=/app/service
+    SERVICEPATH=c:\\app\\service.exe
 
-CMD ["metalcore"]
+CMD ["c:\\metalcore\\metalcore.exe"]

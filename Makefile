@@ -32,17 +32,30 @@ images:
 	#docker build -t metalcore-queue build/docker/metalcore-queue/
 	docker image prune -f
 
+imagewindows:
+	docker build -t metalcore-worker-windows -f build/docker/metalcore-worker-windows/Dockerfile bin/
+	docker image prune -f
+
 runbareimp:
 	QUEUEHOST=localhost QUEUEPORT=11300 TASKQUEUENAME=tasks RESULTQUEUENAME=results CONNSHAREFACTOR=1 LOGLEVEL=trace LOGPRETTYPRINT=on SERVICEPATH=bin/service bin/metalcore
 
 container:
 	docker run --rm --network=host --env LOGPRETTYPRINT=on -it metalcore-worker
 
+containerwindows:
+	docker run --rm --env LOGPRETTYPRINT=on -it metalcore-worker-windows
+
 containertrace:
 	docker run --rm --network=host --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-worker
 
+containerwindowstrace:
+	docker run --rm --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-worker-windows
+
 containershell:
 	docker run --rm --network=host --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-worker /bin/sh
+
+containerwindowsshell:
+	docker run --rm --env LOGLEVEL=trace --env LOGPRETTYPRINT=on -it metalcore-worker-windows cmd.exe
 
 containerdaemon:
 	echo "starting a new container with a random name..."
