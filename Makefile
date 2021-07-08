@@ -72,13 +72,18 @@ clienttrace:
 	bin/clientapp -tasks=100 -size=1024 -sleep=20 -pretty -parallel=1 -loglevel=trace
 
 up:
-	docker-compose --file build/docker/docker-compose.yml --project-name metalcore up --detach --scale worker=3
+	docker-compose --file build/docker/docker-compose.yml --project-name metalcore up --detach --scale worker=6
 
 down:
 	docker-compose --file build/docker/docker-compose.yml --project-name metalcore down --volumes
 
+vendor:
+	go mod vendor
+
 clean: down
 	rm -f bin/*
+	rm -rf vendor
 	go mod tidy
+	go mod vendor
 
 all: clean proto linux images
